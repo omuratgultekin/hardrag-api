@@ -1,9 +1,9 @@
 """
 HardRAG API - FastAPI Backend
 
-REST API for HardRAG validation service.
+REST API for HardRAG validation service with Supabase integration.
 """
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -11,6 +11,10 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import time
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Import from hardrag-core
 try:
@@ -21,6 +25,11 @@ except ImportError:
     sys.path.append('../hardrag-core')
     from hardrag import HardRAGGuard
 
+# Import Supabase and auth
+from auth import get_current_user, get_optional_user
+from supabase_config import log_validation_request, increment_api_usage
+from protected_routes import router as protected_router
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="HardRAG API",
-    description="Evaluation-First Control Layer for Enterprise RAG Systems",
+    description="Evaluation-First Control Layer for Enterprise RAG Systems with Supabase",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -42,6 +51,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(protected_router)
 
 
 # ============================================================================
@@ -155,14 +167,24 @@ async def health_check():
 
 
 @app.post("/validate", response_model=ValidationResponse, tags=["Validation"])
-async def validate_output(request: ValidationRequest):
+async def validate_output(
+    request: ValidationRequest,
+    current_user: Optional[dict] = Depends(get_optional_user)
+):
     """
     Validate a single RAG output against configured guardrails.
+    
+    Authentication is optional. Authenticated users get database logging.
+    
+    **Authentication:**
+    - Bearer token: `Authorization: Bearer <jwt_token>`
+    - API key: `X-API-Key: <api_key>`
     
     This endpoint runs the specified guardrails on the LLM output and returns
     validation results including violations, scores, and suggestions.
     """
     start_time = time.time()
+    user_id = current_user.get("id") if current_user else None
     
     try:
         # Initialize guard
@@ -180,6 +202,22 @@ async def validate_output(request: ValidationRequest):
             metadata=request.metadata
         )
         
+        # Log to Supabase if authenticated
+        if user_id:
+            try:
+                await log_validation_request(
+                    user_id=user_id,
+                    query=request.query,
+                    output=request.llm_output,
+                    is_valid=result.is_valid,
+                    violations=result.violations,
+                    execution_time_ms=result.execution_time_ms,
+                    metadata=request.metadata
+                )
+                await increment_api_usage(user_id, "/validate")
+            except Exception as log_error:
+                logger.warning(f"Failed to log to database: {log_error}")
+        
         # Build response
         response = ValidationResponse(
             is_valid=result.is_valid,
@@ -191,7 +229,10 @@ async def validate_output(request: ValidationRequest):
             audit_trail=result.audit_trail
         )
         
-        logger.info(f"Validation completed in {result.execution_time_ms:.2f}ms - Valid: {result.is_valid}")
+        logger.info(
+            f"Validation completed in {result.execution_time_ms:.2f}ms - "
+            f"Valid: {result.is_valid} - User: {user_id or 'anonymous'}"
+        )
         
         return response
         
@@ -204,12 +245,19 @@ async def validate_output(request: ValidationRequest):
 
 
 @app.post("/validate/batch", tags=["Validation"])
-async def validate_batch(request: BatchValidationRequest):
+async def validate_batch(
+    request: BatchValidationRequest,
+    current_user: Optional[dict] = Depends(get_optional_user)
+):
     """
     Validate multiple RAG outputs in batch.
     
+    Authentication is optional. Authenticated users get database logging.
+    
     Processes multiple validation requests and returns results for each.
     """
+    user_id = current_user.get("id") if current_user else None
+    
     try:
         results = []
         
@@ -227,6 +275,21 @@ async def validate_batch(request: BatchValidationRequest):
                 metadata=item.metadata
             )
             
+            # Log to Supabase if authenticated
+            if user_id:
+                try:
+                    await log_validation_request(
+                        user_id=user_id,
+                        query=item.query,
+                        output=item.llm_output,
+                        is_valid=result.is_valid,
+                        violations=result.violations,
+                        execution_time_ms=result.execution_time_ms,
+                        metadata=item.metadata
+                    )
+                except Exception as log_error:
+                    logger.warning(f"Failed to log batch item: {log_error}")
+            
             results.append({
                 "is_valid": result.is_valid,
                 "violations": result.violations,
@@ -235,6 +298,13 @@ async def validate_batch(request: BatchValidationRequest):
                 "anonymized_output": result.anonymized_output,
                 "suggestions": result.suggestions
             })
+        
+        # Increment usage for batch
+        if user_id:
+            try:
+                await increment_api_usage(user_id, "/validate/batch")
+            except:
+                pass
         
         return {
             "total": len(results),
