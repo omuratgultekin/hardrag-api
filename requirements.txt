@@ -7,7 +7,7 @@ supabase==2.3.0
 slowapi==0.1.9
 pytest==7.4.4
 pytest-asyncio==0.23.3
-httpx==0.26.0
+httpx>=0.24.0,<0.25.0
 
 # HardRAG core (from PyPI)
 hardrag-core==0.1.0
