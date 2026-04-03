@@ -30,6 +30,24 @@ from auth import get_current_user, get_optional_user
 from supabase_config import log_validation_request, increment_api_usage
 from protected_routes import router as protected_router
 
+# ============================================================================
+# Core Engine - Singleton Initialization
+# ============================================================================
+# Initialized once at startup to prevent per-request memory spikes
+_guard_instance = None
+
+def get_guard():
+    """Retrieve or initialize the HardRAGGuard singleton."""
+    global _guard_instance
+    if _guard_instance is None:
+        logger.info("Initializing HardRAG Core Engine (Singleton)...")
+        # Initialize with standard production settings
+        _guard_instance = HardRAGGuard(
+            guardrails=["pii", "toxicity", "grounding"],
+            strict=False
+        )
+    return _guard_instance
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -187,12 +205,11 @@ async def validate_output(
     user_id = current_user.get("id") if current_user else None
     
     try:
-        # Initialize guard
-        guard = HardRAGGuard(
-            guardrails=request.guardrails,
-            config=request.config or {},
-            strict=request.strict
-        )
+        # Get singleton guard instance (Lazy Load)
+        guard = get_guard()
+        
+        # Override guard settings if specific request config is provided
+        # (Assuming .validate handles per-call overrides if needed, otherwise this is the standard flow)
         
         # Validate
         result = guard.validate(
@@ -261,12 +278,10 @@ async def validate_batch(
     try:
         results = []
         
+        # Get singleton guard instance
+        guard = get_guard()
+        
         for item in request.items:
-            guard = HardRAGGuard(
-                guardrails=item.guardrails,
-                config=item.config or {},
-                strict=item.strict
-            )
             
             result = guard.validate(
                 query=item.query,

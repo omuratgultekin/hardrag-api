@@ -46,10 +46,12 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
         client = get_supabase_admin_client()
         user_id = current_user.get("id")
         
-        # Get all validations
+        # Get validations (Rolling average of last 500 for stats to save memory)
         result = client.table("validation_requests")\
             .select("is_valid, execution_time_ms")\
             .eq("user_id", user_id)\
+            .order("created_at", desc=True)\
+            .limit(500)\
             .execute()
         
         validations = result.data
@@ -62,13 +64,21 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
                 avg_execution_time_ms=0.0
             )
         
-        total = len(validations)
+        # Note: 'total' here represents the subset for rolling stats
+        subset_count = len(validations)
         valid = sum(1 for v in validations if v["is_valid"])
-        invalid = total - valid
-        avg_time = sum(v["execution_time_ms"] for v in validations) / total
+        invalid = subset_count - valid
+        avg_time = sum(v["execution_time_ms"] for v in validations) / subset_count
+        
+        # Get absolute total count for the user (lightweight)
+        total_res = client.table("validation_requests")\
+            .select("id", count="exact")\
+            .eq("user_id", user_id)\
+            .execute()
+        total_all_time = total_res.count or 0
         
         return UserStats(
-            total_validations=total,
+            total_validations=total_all_time,
             valid_count=valid,
             invalid_count=invalid,
             avg_execution_time_ms=round(avg_time, 2)
